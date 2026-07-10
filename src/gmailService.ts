@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Email, EmailAnalysis, EmailCategory, UrgencyLevel } from './types';
+import { Email, EmailAnalysis, EmailCategory, UrgencyLevel, MonitoringRule } from './types';
 
 // Helper to get header value safely
 const getHeader = (headers: { name: string; value: string }[], name: string): string => {
@@ -174,12 +174,12 @@ export const fetchSingleEmailBody = async (accessToken: string, emailId: string)
 };
 
 // Batch classify emails using backend
-export const classifyEmailsBatch = async (emails: Email[]): Promise<Email[]> => {
+export const classifyEmailsBatch = async (emails: Email[], rules: MonitoringRule[] = []): Promise<Email[]> => {
   try {
     const response = await fetch('/api/classify-batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ emails }),
+      body: JSON.stringify({ emails, rules }),
     });
 
     if (!response.ok) {
@@ -199,18 +199,20 @@ export const classifyEmailsBatch = async (emails: Email[]): Promise<Email[]> => 
           ...email,
           category: match.category as EmailCategory,
           urgency: match.urgency as UrgencyLevel,
+          triggeredRuleIds: match.triggeredRuleIds || [],
         };
       }
       return {
         ...email,
         category: 'general' as EmailCategory,
         urgency: 'low' as UrgencyLevel,
+        triggeredRuleIds: [],
       };
     });
   } catch (error) {
     console.error('Error in classifyEmailsBatch:', error);
     // Fallback categories if backend has issue
-    return emails.map(e => ({ ...e, category: 'general', urgency: 'low' }));
+    return emails.map(e => ({ ...e, category: 'general', urgency: 'low', triggeredRuleIds: [] }));
   }
 };
 
@@ -244,13 +246,13 @@ export const analyzeEmailWithAI = async (email: Email): Promise<EmailAnalysis> =
   }
 };
 
-// Regenerate reply draft with custom tone
-export const generateDraftReplyWithTone = async (email: Email, tone: string): Promise<string> => {
+// Regenerate reply draft with custom tone or instructions
+export const generateDraftReplyWithTone = async (email: Email, tone: string, customInstructions?: string): Promise<string> => {
   try {
     const response = await fetch('/api/generate-reply', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, tone }),
+      body: JSON.stringify({ email, tone, customInstructions }),
     });
 
     if (!response.ok) {

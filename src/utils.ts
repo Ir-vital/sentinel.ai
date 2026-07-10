@@ -15,18 +15,18 @@ export const renderSimpleMarkdown = (text: string): string => {
 
   // Restore some safe characters or formats
   // Headlines
-  html = html.replace(/^### (.*?)$/gm, '<h3 class="text-sm font-bold text-slate-800 mt-4 mb-1.5">$1</h3>');
-  html = html.replace(/^## (.*?)$/gm, '<h2 class="text-md font-bold text-slate-900 mt-5 mb-2 border-b border-slate-100 pb-1">$1</h2>');
-  html = html.replace(/^# (.*?)$/gm, '<h1 class="text-lg font-extrabold text-slate-900 mt-6 mb-3">$1</h1>');
+  html = html.replace(/^### (.*?)$/gm, '<h3 class="text-xs font-black uppercase tracking-wider text-white mt-4 mb-2">$1</h3>');
+  html = html.replace(/^## (.*?)$/gm, '<h2 class="text-sm font-black uppercase tracking-widest text-[#CCFF00] mt-5 mb-2.5 border-b border-white/10 pb-1.5">$1</h2>');
+  html = html.replace(/^# (.*?)$/gm, '<h1 class="text-base font-black uppercase tracking-widest text-white mt-6 mb-3 border-b border-white/15 pb-2">$1</h1>');
 
   // Bold
-  html = html.replace(/\*\*(.*?)\*\*/g, '<strong class="font-bold text-slate-900">$1</strong>');
+  html = html.replace(/\*\*(.*?)\*\*/g, '<strong class="font-extrabold text-[#CCFF00]">$1</strong>');
   
   // Italic
-  html = html.replace(/\*(.*?)\*/g, '<em class="italic text-slate-800">$1</em>');
+  html = html.replace(/\*(.*?)\*/g, '<em class="italic text-white/90">$1</em>');
 
   // Lists - we wrap list items with ul if needed, or just let them stand with custom padding
-  html = html.replace(/^\s*[-*]\s+(.*?)$/gm, '<li class="ml-5 list-disc text-slate-600 my-1 text-sm">$1</li>');
+  html = html.replace(/^\s*[-*]\s+(.*?)$/gm, '<li class="ml-5 list-disc text-white/80 my-1.5 text-xs">$1</li>');
 
   // Handle line breaks
   const paragraphs = html.split('\n\n');
@@ -36,7 +36,7 @@ export const renderSimpleMarkdown = (text: string): string => {
     if (trimmed.startsWith('<h') || trimmed.startsWith('<li')) {
       return trimmed;
     }
-    return `<p class="text-slate-600 my-1.5 leading-relaxed text-sm">${trimmed}</p>`;
+    return `<p class="text-white/80 my-2 leading-relaxed text-xs">${trimmed}</p>`;
   });
 
   return formatted.join('\n');

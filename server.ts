@@ -41,7 +41,7 @@ async function startServer() {
   // Batch classify emails for the dashboard
   app.post('/api/classify-batch', async (req, res) => {
     try {
-      const { emails } = req.body;
+      const { emails, rules } = req.body;
       if (!emails || !Array.isArray(emails)) {
         return res.status(400).json({ error: 'Invalid emails list provided' });
       }
@@ -50,13 +50,31 @@ async function startServer() {
         return res.json({ classifications: [] });
       }
 
+      const semanticRules = Array.isArray(rules)
+        ? rules.filter(r => r.isActive && r.type === 'semantic')
+        : [];
+
       const ai = getGeminiClient();
-      const prompt = `You are an expert AI email triage assistant. Given a list of emails (each with id, subject, sender, and body snippet), categorize each email and determine its urgency level.
+      
+      let rulesInstructions = '';
+      if (semanticRules.length > 0) {
+        rulesInstructions = `Additionally, check if each email matches any of the following Semantic AI Monitoring Rules.
+A rule matches if the email content/subject/intent triggers or aligns with the rule pattern instruction.
+Semantic rules to check:
+${semanticRules.map(r => `- Rule ID: "${r.id}" | Pattern/Instruction: "${r.pattern}" | Description: ${r.description}`).join('\n')}
+
+For each email, include a "triggeredRuleIds" array field containing the IDs of any rules that matched. If no rules matched, return an empty array [] for that email.`;
+      }
+
+      const prompt = `You are an expert AI email triage assistant. Given a list of emails (each with id, subject, sender, and body snippet), categorize each email, determine its urgency level, and check active semantic rules.
+
 Categories allowed: 'urgent' | 'action_required' | 'newsletter' | 'personal' | 'commercial' | 'social' | 'general'
 Urgency levels allowed: 'high' | 'medium' | 'low'
 
 Emails list:
 ${JSON.stringify(emails.map(e => ({ id: e.id, subject: e.subject, from: e.from, snippet: e.snippet })), null, 2)}
+
+${rulesInstructions}
 
 Return a JSON object containing an array of classifications. Match the email 'id' exactly.
 Structure:
@@ -65,7 +83,8 @@ Structure:
     {
       "id": "email_id",
       "category": "urgent" | "action_required" | "newsletter" | "personal" | "commercial" | "social" | "general",
-      "urgency": "high" | "medium" | "low"
+      "urgency": "high" | "medium" | "low",
+      "triggeredRuleIds": ["rule_id_1"]
     }
   ]
 }`;
@@ -134,28 +153,37 @@ Analyze the email text and return a JSON object with this exact structure:
     }
   });
 
-  // Regenerate a reply draft with a specific tone
+  // Regenerate a reply draft with a specific tone or custom instructions
   app.post('/api/generate-reply', async (req, res) => {
     try {
-      const { email, tone } = req.body;
+      const { email, tone, customInstructions } = req.body;
       if (!email || !email.id) {
         return res.status(400).json({ error: 'No email provided for reply drafting' });
       }
 
       const ai = getGeminiClient();
+      
+      let instructionsText = '';
+      if (customInstructions && customInstructions.trim()) {
+        instructionsText = `The user has provided the following custom instructions that MUST be strictly followed in writing the reply:
+"${customInstructions}"`;
+      } else {
+        instructionsText = `The draft reply MUST match the following tone: "${tone || 'professional'}".
+Options are:
+- "Professionnel" (Professional, standard, respectful, clear)
+- "Amical / Chaleureux" (Friendly, warm, close, enthusiastic)
+- "Direct / Concis" (Direct, short, brief, concise, straight to the point)
+- "Négociateur / Ferme" (Negotiating, firm, assertive, business-driven)
+- "S'excuser pour retard" (Apologizing, polite, acknowledging late response, constructive)`;
+      }
+
       const prompt = `You are an expert AI email virtual assistant. Write a polite, professional, and helpful draft reply on behalf of the user to the following email:
 Subject: ${email.subject}
 From: ${email.from}
 Snippet: ${email.snippet}
 Body: ${email.body || email.snippet}
 
-The draft reply MUST match the following tone: "${tone || 'professional'}".
-Options are:
-- "Professionnel" (Professional, standard, respectful, clear)
-- "Amical / Chaleureux" (Friendly, warm, close, enthusiastic)
-- "Direct / Concis" (Direct, short, brief, concise, straight to the point)
-- "Négociateur / Ferme" (Negotiating, firm, assertive, business-driven)
-- "S'excuser pour retard" (Apologizing, polite, acknowledging late response, constructive)
+${instructionsText}
 
 IMPORTANT RULES:
 1. Write the reply in the SAME language as the incoming email (detect if French, English, etc.).

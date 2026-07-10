@@ -21,6 +21,7 @@ export interface Email {
   category?: EmailCategory;
   urgency?: UrgencyLevel;
   read: boolean;
+  triggeredRuleIds?: string[];
 }
 
 export interface EmailAnalysis {

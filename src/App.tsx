@@ -19,7 +19,7 @@ import {
 } from './gmailService';
 import { 
   Email, EmailAnalysis, EmailCategory, UrgencyLevel, 
-  MonitoringRule, MonitoringAlert, AgentLog 
+  MonitoringRule, MonitoringAlert, AgentLog, RuleType 
 } from './types';
 import { 
   renderSimpleMarkdown, formatEmailDate, getInitials, generateId 
@@ -43,7 +43,8 @@ export default function App() {
   // Email & Agent States
   const [emails, setEmails] = useState<Email[]>([]);
   const [emailsLoading, setEmailsLoading] = useState<boolean>(false);
-  const [activeFilter, setActiveFilter] = useState<EmailCategory | 'all' | 'unread' | 'urgent_only'>('all');
+  const [activeFilter, setActiveFilter] = useState<EmailCategory | 'all' | 'unread' | 'urgent' | 'starred' | 'processed'>('all');
+  const [searchQuery, setSearchQuery] = useState<string>('');
   const [isPolling, setIsPolling] = useState<boolean>(false);
   const [lastScanTime, setLastScanTime] = useState<Date | null>(null);
 
@@ -59,10 +60,21 @@ export default function App() {
   });
   const [newRulePattern, setNewRulePattern] = useState<string>('');
   const [newRuleDescription, setNewRuleDescription] = useState<string>('');
+  const [newRuleType, setNewRuleType] = useState<RuleType>('keyword');
 
   // Alerts Logged
   const [alerts, setAlerts] = useState<MonitoringAlert[]>(() => {
     const saved = localStorage.getItem('agent_alerts');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  // Local Star & Processed Email tracking
+  const [starredEmailIds, setStarredEmailIds] = useState<string[]>(() => {
+    const saved = localStorage.getItem('starred_emails');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [processedEmailIds, setProcessedEmailIds] = useState<string[]>(() => {
+    const saved = localStorage.getItem('processed_emails');
     return saved ? JSON.parse(saved) : [];
   });
 
@@ -75,6 +87,7 @@ export default function App() {
   const [emailAnalysis, setEmailAnalysis] = useState<EmailAnalysis | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState<boolean>(false);
   const [replyTone, setReplyTone] = useState<string>('Professionnel');
+  const [customInstructions, setCustomInstructions] = useState<string>('');
   const [replyDraft, setReplyDraft] = useState<string>('');
   const [replyLoading, setReplyLoading] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
@@ -96,6 +109,15 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('agent_alerts', JSON.stringify(alerts));
   }, [alerts]);
+
+  // Persist Starred & Processed list
+  useEffect(() => {
+    localStorage.setItem('starred_emails', JSON.stringify(starredEmailIds));
+  }, [starredEmailIds]);
+
+  useEffect(() => {
+    localStorage.setItem('processed_emails', JSON.stringify(processedEmailIds));
+  }, [processedEmailIds]);
 
   // Add Log helper
   const addLog = (message: string, type: 'info' | 'success' | 'warning' | 'alert' | 'error' = 'info') => {
@@ -212,29 +234,54 @@ export default function App() {
 
       // 2. Classify via Gemini Server proxy
       addLog('🧠 Agent : Triage intelligent par l\'IA Gemini en cours...', 'info');
-      const classified = await classifyEmailsBatch(fetched);
+      const classified = await classifyEmailsBatch(fetched, rules);
       setEmails(classified);
       setLastScanTime(new Date());
       addLog('✅ Agent : Triage et catégorisation terminés avec succès.', 'success');
 
-      // 3. Scan rules and trigger keyword alerts
+      // 3. Scan rules and trigger keyword/sender/semantic alerts
       addLog('🚨 Agent : Analyse des règles de surveillance...', 'info');
       let alertCount = 0;
       
       classified.forEach(email => {
         // Run active rules
         rules.filter(r => r.isActive).forEach(rule => {
-          const matchPattern = rule.pattern.toLowerCase();
-          const subjectMatch = email.subject.toLowerCase().includes(matchPattern);
-          const senderMatch = email.from.toLowerCase().includes(matchPattern);
-          const bodyMatch = email.body?.toLowerCase().includes(matchPattern);
-          const snippetMatch = email.snippet.toLowerCase().includes(matchPattern);
+          let isTriggered = false;
+          let matchedStr = '';
 
-          if (subjectMatch || senderMatch || bodyMatch || snippetMatch) {
+          if (rule.type === 'semantic') {
+            if (email.triggeredRuleIds?.includes(rule.id)) {
+              isTriggered = true;
+              matchedStr = 'Analyse Sémantique IA';
+            }
+          } else if (rule.type === 'sender') {
+            const matchPattern = rule.pattern.toLowerCase();
+            const senderMatch = 
+              email.from.toLowerCase().includes(matchPattern) || 
+              email.fromName.toLowerCase().includes(matchPattern) || 
+              email.fromEmail.toLowerCase().includes(matchPattern);
+            if (senderMatch) {
+              isTriggered = true;
+              matchedStr = 'Expéditeur';
+            }
+          } else {
+            // default is keyword
+            const matchPattern = rule.pattern.toLowerCase();
+            const subjectMatch = email.subject.toLowerCase().includes(matchPattern);
+            const senderMatch = email.from.toLowerCase().includes(matchPattern);
+            const snippetMatch = email.snippet.toLowerCase().includes(matchPattern);
+            const bodyMatch = email.body?.toLowerCase().includes(matchPattern);
+
+            if (subjectMatch || senderMatch || snippetMatch || bodyMatch) {
+              isTriggered = true;
+              matchedStr = subjectMatch ? 'Objet' : senderMatch ? 'Expéditeur' : 'Contenu';
+            }
+          }
+
+          if (isTriggered) {
             // Check if alert already logged to prevent duplicates
             const alertExists = alerts.some(a => a.emailId === email.id && a.ruleId === rule.id);
             if (!alertExists) {
-              const matchedStr = subjectMatch ? 'Objet' : senderMatch ? 'Expéditeur' : 'Contenu';
               const newAlert: MonitoringAlert = {
                 id: generateId(),
                 ruleId: rule.id,
@@ -243,7 +290,9 @@ export default function App() {
                 emailSubject: email.subject,
                 emailFrom: email.fromName,
                 timestamp: new Date().toLocaleString('fr-FR'),
-                matchedContent: `${matchedStr} correspond à "${rule.pattern}"`,
+                matchedContent: rule.type === 'semantic'
+                  ? `Correspondance sémantique validée par l'IA`
+                  : `${matchedStr} correspond à "${rule.pattern}"`,
               };
               
               setAlerts(prev => [newAlert, ...prev]);
@@ -297,6 +346,7 @@ export default function App() {
     setEmailAnalysis(null);
     setReplyDraft('');
     setReplyTone('Professionnel');
+    setCustomInstructions('');
     addLog(`🔍 Agent : Analyse détaillée de l'e-mail de "${email.fromName}"...`, 'info');
 
     try {
@@ -311,15 +361,16 @@ export default function App() {
     }
   };
 
-  // Regenerate reply draft with custom tone
-  const handleRegenerateDraft = async (tone: string) => {
+  // Regenerate reply draft with custom tone or instructions
+  const handleRegenerateDraft = async (tone: string, instructions?: string) => {
     if (!selectedEmail) return;
     setReplyLoading(true);
     setReplyTone(tone);
-    addLog(`🔄 Agent : Régénération du brouillon de réponse avec un ton "${tone}"...`, 'info');
+    const instructionsToUse = instructions !== undefined ? instructions : customInstructions;
+    addLog(`🔄 Agent : Régénération du brouillon de réponse...`, 'info');
 
     try {
-      const regeneratedReply = await generateDraftReplyWithTone(selectedEmail, tone);
+      const regeneratedReply = await generateDraftReplyWithTone(selectedEmail, tone, instructionsToUse);
       setReplyDraft(regeneratedReply);
       addLog('✨ Agent : Nouveau brouillon de réponse rédigé.', 'success');
       showToast('Brouillon mis à jour !', 'success');
@@ -355,7 +406,7 @@ export default function App() {
 
     const newRule: MonitoringRule = {
       id: generateId(),
-      type: 'keyword',
+      type: newRuleType,
       pattern: newRulePattern.trim().toLowerCase(),
       description: newRuleDescription.trim(),
       isActive: true,
@@ -363,12 +414,13 @@ export default function App() {
     };
 
     setRules(prev => [...prev, newRule]);
-    addLog(`⚙️ Agent : Nouvelle règle ajoutée : "${newRule.description}" (${newRule.pattern})`, 'info');
+    addLog(`⚙️ Agent : Nouvelle règle [${newRuleType === 'semantic' ? 'Sémantique IA' : newRuleType === 'sender' ? 'Expéditeur' : 'Mot-clé'}] ajoutée : "${newRule.description}" (${newRule.pattern})`, 'info');
     showToast('Nouvelle règle enregistrée !', 'success');
     
     // Clear form
     setNewRulePattern('');
     setNewRuleDescription('');
+    setNewRuleType('keyword');
   };
 
   const handleToggleRule = (ruleId: string) => {
@@ -428,18 +480,34 @@ export default function App() {
     }
   };
 
-  // Filter emails list based on selection
+  // Filter emails list based on selection and search query
   const filteredEmails = emails.filter(email => {
+    // Apply search query first
+    if (searchQuery.trim() !== '') {
+      const query = searchQuery.toLowerCase();
+      const matchesSearch = 
+        email.subject.toLowerCase().includes(query) ||
+        email.fromName.toLowerCase().includes(query) ||
+        email.fromEmail.toLowerCase().includes(query) ||
+        email.snippet.toLowerCase().includes(query) ||
+        (email.body && email.body.toLowerCase().includes(query));
+      if (!matchesSearch) return false;
+    }
+
     if (activeFilter === 'all') return true;
     if (activeFilter === 'unread') return !email.read;
-    if (activeFilter === 'urgent_only') return email.urgency === 'high';
+    if (activeFilter === 'urgent') return email.urgency === 'high' || email.category === 'urgent';
+    if (activeFilter === 'starred') return starredEmailIds.includes(email.id);
+    if (activeFilter === 'processed') return processedEmailIds.includes(email.id);
     return email.category === activeFilter;
   });
 
   // Count helper for badge summaries
   const countByCategory = (cat: EmailCategory) => emails.filter(e => e.category === cat).length;
   const countUnread = emails.filter(e => !e.read).length;
-  const countHighUrgency = emails.filter(e => e.urgency === 'high').length;
+  const countHighUrgency = emails.filter(e => e.urgency === 'high' || e.category === 'urgent').length;
+  const countStarred = emails.filter(e => starredEmailIds.includes(e.id)).length;
+  const countProcessed = emails.filter(e => processedEmailIds.includes(e.id)).length;
 
   // Onboarding View
   if (needsAuth) {
@@ -702,7 +770,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Monitoring Keyword Rules Widget */}
+          {/* Monitoring Keyword/Sender/Semantic Rules Widget */}
           <div className="bg-[#141414] border border-white/15 p-6 space-y-6">
             <h2 className="text-xs font-black uppercase tracking-widest text-white/50 flex items-center justify-between pb-3 border-b border-white/10">
               <span className="flex items-center space-x-2">
@@ -728,13 +796,15 @@ export default function App() {
                       <CheckCircle className="w-3.5 h-3.5" />
                     </button>
                     <div>
-                      <p className="text-2xs font-black text-white flex items-center space-x-1.5 flex-wrap gap-1">
-                        <span>{rule.description}</span>
-                        <span className="px-1 py-0.5 rounded-none text-[9px] font-mono uppercase bg-white/15 text-[#CCFF00]">
-                          "{rule.pattern}"
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <p className="text-2xs font-black text-white">{rule.description}</p>
+                        <span className="px-1.5 py-0.5 text-[8px] font-mono font-bold uppercase border border-[#CCFF00]/30 text-[#CCFF00]">
+                          {rule.type === 'semantic' ? 'IA Sémantique' : rule.type === 'sender' ? 'Expéditeur' : 'Mot-clé'}
                         </span>
+                      </div>
+                      <p className="text-[10px] font-mono text-white/50 mt-1 uppercase tracking-wider">
+                        Cible : <span className="text-[#CCFF00]">"{rule.pattern}"</span>
                       </p>
-                      <p className="text-[10px] text-white/40 uppercase tracking-wider mt-0.5">{rule.isActive ? 'Règle active' : 'Règle en pause'}</p>
                     </div>
                   </div>
                   <button 
@@ -750,10 +820,57 @@ export default function App() {
             {/* Add Rule Quick Form */}
             <form onSubmit={handleAddRule} className="border-t border-white/10 pt-4 space-y-4">
               <p className="text-[10px] font-black text-white/50 uppercase tracking-widest">Créer une nouvelle règle</p>
+              
+              {/* Rule Type Selector */}
+              <div className="flex bg-[#0D0D0D] border border-white/15 p-1 gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNewRuleType('keyword');
+                    setNewRulePattern('');
+                  }}
+                  className={`flex-1 py-1 text-[9px] font-black uppercase tracking-wider transition cursor-pointer ${
+                    newRuleType === 'keyword' ? 'bg-[#CCFF00] text-black font-black' : 'text-white/50 hover:text-white'
+                  }`}
+                >
+                  Mot-clé
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNewRuleType('sender');
+                    setNewRulePattern('');
+                  }}
+                  className={`flex-1 py-1 text-[9px] font-black uppercase tracking-wider transition cursor-pointer ${
+                    newRuleType === 'sender' ? 'bg-[#CCFF00] text-black font-black' : 'text-white/50 hover:text-white'
+                  }`}
+                >
+                  Expéditeur
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNewRuleType('semantic');
+                    setNewRulePattern('');
+                  }}
+                  className={`flex-1 py-1 text-[9px] font-black uppercase tracking-wider transition cursor-pointer ${
+                    newRuleType === 'semantic' ? 'bg-[#CCFF00] text-black font-black' : 'text-white/50 hover:text-white'
+                  }`}
+                >
+                  IA Sémantique
+                </button>
+              </div>
+
               <div className="grid grid-cols-2 gap-2">
                 <input 
                   type="text" 
-                  placeholder="Mot-clé (ex: facture)" 
+                  placeholder={
+                    newRuleType === 'keyword' 
+                      ? "ex: facture" 
+                      : newRuleType === 'sender' 
+                        ? "ex: paypal.com" 
+                        : "ex: demande de devis"
+                  } 
                   value={newRulePattern}
                   onChange={e => setNewRulePattern(e.target.value)}
                   className="px-3 py-2 border border-white/15 text-xs bg-[#0D0D0D] text-white placeholder-white/30 focus:bg-[#0D0D0D] focus:outline-none focus:border-[#CCFF00] transition"
@@ -928,60 +1045,111 @@ export default function App() {
 
           {/* Inbox Email list */}
           <div className="bg-[#141414] border border-white/15 p-6 space-y-6">
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pb-4 border-b border-white/10">
-              <h2 className="text-xs font-black uppercase tracking-widest text-white/50 flex items-center space-x-2">
+            <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 pb-4 border-b border-white/10">
+              <div className="flex items-center space-x-3 shrink-0">
                 <Mail className="w-5 h-5 text-[#CCFF00]" />
-                <span>Boîte de Réception ({filteredEmails.length})</span>
-              </h2>
+                <h2 className="text-xs font-black uppercase tracking-widest text-white">
+                  Boîte de Réception ({filteredEmails.length})
+                </h2>
+              </div>
 
-              {/* Filtering Controls */}
-              <div className="flex flex-wrap items-center gap-1.5 bg-[#0D0D0D] p-1.5 border border-white/10">
-                <button 
-                  onClick={() => setActiveFilter('all')}
-                  className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-wider transition cursor-pointer ${
-                    activeFilter === 'all' ? 'bg-[#CCFF00] text-black' : 'text-white/50 hover:text-white hover:bg-white/5'
-                  }`}
-                >
-                  Tous
-                </button>
-                <button 
-                  onClick={() => setActiveFilter('unread')}
-                  className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-wider transition cursor-pointer relative ${
-                    activeFilter === 'unread' ? 'bg-[#CCFF00] text-black' : 'text-white/50 hover:text-white hover:bg-white/5'
-                  }`}
-                >
-                  Non-lus
-                  {countUnread > 0 && (
-                    <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-rose-500" />
+              {/* Search Bar & Filtering Controls */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full xl:w-auto">
+                {/* Search Bar Input */}
+                <div className="relative flex-grow sm:flex-grow-0 sm:w-60">
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={e => setSearchQuery(e.target.value)}
+                    placeholder="Rechercher un e-mail..."
+                    className="w-full pl-8 pr-3 py-1.5 border border-white/15 text-xs bg-[#0D0D0D] text-white placeholder-white/30 focus:outline-none focus:border-[#CCFF00] transition font-mono"
+                  />
+                  <div className="absolute left-2.5 top-2.5 text-white/30">
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
+                  </div>
+                  {searchQuery && (
+                    <button 
+                      onClick={() => setSearchQuery('')}
+                      className="absolute right-2.5 top-2 text-white/50 hover:text-white text-xs font-bold cursor-pointer"
+                    >
+                      ×
+                    </button>
                   )}
-                </button>
-                <button 
-                  onClick={() => setActiveFilter('urgent')}
-                  className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-wider transition cursor-pointer relative ${
-                    activeFilter === 'urgent' ? 'bg-[#CCFF00] text-black' : 'text-white/50 hover:text-white hover:bg-white/5'
-                  }`}
-                >
-                  Urgents
-                  {countHighUrgency > 0 && (
-                    <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-rose-500" />
-                  )}
-                </button>
-                <button 
-                  onClick={() => setActiveFilter('action_required')}
-                  className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-wider transition cursor-pointer ${
-                    activeFilter === 'action_required' ? 'bg-[#CCFF00] text-black' : 'text-white/50 hover:text-white hover:bg-white/5'
-                  }`}
-                >
-                  Actions
-                </button>
-                <button 
-                  onClick={() => setActiveFilter('newsletter')}
-                  className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-wider transition cursor-pointer ${
-                    activeFilter === 'newsletter' ? 'bg-[#CCFF00] text-black' : 'text-white/50 hover:text-white hover:bg-white/5'
-                  }`}
-                >
-                  Newsletters
-                </button>
+                </div>
+
+                {/* Filters */}
+                <div className="flex flex-wrap items-center gap-1 bg-[#0D0D0D] p-1 border border-white/10">
+                  <button 
+                    onClick={() => setActiveFilter('all')}
+                    className={`px-2.5 py-1.5 text-[9px] font-black uppercase tracking-wider transition cursor-pointer ${
+                      activeFilter === 'all' ? 'bg-[#CCFF00] text-black' : 'text-white/50 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    Tous
+                  </button>
+                  <button 
+                    onClick={() => setActiveFilter('unread')}
+                    className={`px-2.5 py-1.5 text-[9px] font-black uppercase tracking-wider transition cursor-pointer relative ${
+                      activeFilter === 'unread' ? 'bg-[#CCFF00] text-black' : 'text-white/50 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    Non-lus
+                    {countUnread > 0 && (
+                      <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-rose-500" />
+                    )}
+                  </button>
+                  <button 
+                    onClick={() => setActiveFilter('urgent')}
+                    className={`px-2.5 py-1.5 text-[9px] font-black uppercase tracking-wider transition cursor-pointer relative ${
+                      activeFilter === 'urgent' ? 'bg-[#CCFF00] text-black' : 'text-white/50 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    Urgents
+                    {countHighUrgency > 0 && (
+                      <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-rose-500" />
+                    )}
+                  </button>
+                  <button 
+                    onClick={() => setActiveFilter('starred')}
+                    className={`px-2.5 py-1.5 text-[9px] font-black uppercase tracking-wider transition cursor-pointer relative ${
+                      activeFilter === 'starred' ? 'bg-[#CCFF00] text-black' : 'text-white/50 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    ★ Favoris
+                    {countStarred > 0 && (
+                      <span className="ml-1 px-1.5 py-0.5 bg-white/10 text-[8px] font-mono">{countStarred}</span>
+                    )}
+                  </button>
+                  <button 
+                    onClick={() => setActiveFilter('processed')}
+                    className={`px-2.5 py-1.5 text-[9px] font-black uppercase tracking-wider transition cursor-pointer relative ${
+                      activeFilter === 'processed' ? 'bg-[#CCFF00] text-black' : 'text-white/50 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    ✓ Traités
+                    {countProcessed > 0 && (
+                      <span className="ml-1 px-1.5 py-0.5 bg-white/10 text-[8px] font-mono">{countProcessed}</span>
+                    )}
+                  </button>
+                  <button 
+                    onClick={() => setActiveFilter('action_required')}
+                    className={`px-2.5 py-1.5 text-[9px] font-black uppercase tracking-wider transition cursor-pointer ${
+                      activeFilter === 'action_required' ? 'bg-[#CCFF00] text-black' : 'text-white/50 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    Actions
+                  </button>
+                  <button 
+                    onClick={() => setActiveFilter('newsletter')}
+                    className={`px-2.5 py-1.5 text-[9px] font-black uppercase tracking-wider transition cursor-pointer ${
+                      activeFilter === 'newsletter' ? 'bg-[#CCFF00] text-black' : 'text-white/50 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    News
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -1003,9 +1171,16 @@ export default function App() {
                   const isUrgent = email.urgency === 'high';
                   // Check if matching any rule for red warning outline
                   const matchesRule = rules.some(r => r.isActive && (
-                    email.subject.toLowerCase().includes(r.pattern) || 
-                    email.from.toLowerCase().includes(r.pattern) ||
-                    email.snippet.toLowerCase().includes(r.pattern)
+                    r.type === 'semantic' ? email.triggeredRuleIds?.includes(r.id) :
+                    r.type === 'sender' ? (
+                      email.from.toLowerCase().includes(r.pattern) ||
+                      email.fromName.toLowerCase().includes(r.pattern) ||
+                      email.fromEmail.toLowerCase().includes(r.pattern)
+                    ) : (
+                      email.subject.toLowerCase().includes(r.pattern) || 
+                      email.from.toLowerCase().includes(r.pattern) ||
+                      email.snippet.toLowerCase().includes(r.pattern)
+                    )
                   ));
 
                    return (
@@ -1034,9 +1209,17 @@ export default function App() {
                           <p className={`text-xs truncate font-black ${!email.read ? 'text-[#CCFF00]' : 'text-white/80'}`}>
                             {email.fromName}
                           </p>
-                          <span className="text-[10px] font-mono text-white/40 pl-2 shrink-0 uppercase tracking-wider">
-                            {formatEmailDate(email.date)}
-                          </span>
+                          <div className="flex items-center space-x-2 shrink-0">
+                            {starredEmailIds.includes(email.id) && (
+                              <span className="text-[#CCFF00] text-xs" title="Favori">★</span>
+                            )}
+                            {processedEmailIds.includes(email.id) && (
+                              <CheckCircle className="w-3.5 h-3.5 text-emerald-400" title="Traité" />
+                            )}
+                            <span className="text-[10px] font-mono text-white/40 pl-1 shrink-0 uppercase tracking-wider">
+                              {formatEmailDate(email.date)}
+                            </span>
+                          </div>
                         </div>
 
                         <h4 className={`text-xs truncate font-black leading-snug ${!email.read ? 'text-white' : 'text-white/70'}`}>
@@ -1096,12 +1279,58 @@ export default function App() {
                   </div>
                   <span>Inspecteur d'E-mails d'IA</span>
                 </div>
-                <button 
-                  onClick={() => setSelectedEmail(null)}
-                  className="p-2 border border-transparent hover:border-white/15 bg-transparent hover:bg-white/5 text-white/60 hover:text-white transition cursor-pointer"
-                >
-                  <X className="w-5 h-5" />
-                </button>
+                <div className="flex items-center space-x-2">
+                  {/* Star toggle button */}
+                  <button 
+                    onClick={() => {
+                      const isStarred = starredEmailIds.includes(selectedEmail.id);
+                      if (isStarred) {
+                        setStarredEmailIds(prev => prev.filter(id => id !== selectedEmail.id));
+                        showToast('Retiré des favoris', 'info');
+                      } else {
+                        setStarredEmailIds(prev => [...prev, selectedEmail.id]);
+                        showToast('Ajouté aux favoris !', 'success');
+                      }
+                    }}
+                    className={`p-2 border transition cursor-pointer flex items-center justify-center ${
+                      starredEmailIds.includes(selectedEmail.id)
+                        ? 'bg-[#CCFF00]/10 border-[#CCFF00] text-[#CCFF00]'
+                        : 'border-white/10 bg-white/5 hover:border-white/20 text-white/60 hover:text-white'
+                    }`}
+                    title={starredEmailIds.includes(selectedEmail.id) ? 'Retirer des favoris' : 'Marquer comme favori'}
+                  >
+                    <span className="text-sm">★</span>
+                  </button>
+
+                  {/* Processed toggle button */}
+                  <button 
+                    onClick={() => {
+                      const isProcessed = processedEmailIds.includes(selectedEmail.id);
+                      if (isProcessed) {
+                        setProcessedEmailIds(prev => prev.filter(id => id !== selectedEmail.id));
+                        showToast('E-mail marqué comme non traité', 'info');
+                      } else {
+                        setProcessedEmailIds(prev => [...prev, selectedEmail.id]);
+                        showToast('E-mail marqué comme traité !', 'success');
+                      }
+                    }}
+                    className={`p-2 border transition cursor-pointer flex items-center justify-center ${
+                      processedEmailIds.includes(selectedEmail.id)
+                        ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-400'
+                        : 'border-white/10 bg-white/5 hover:border-white/20 text-white/60 hover:text-white'
+                    }`}
+                    title={processedEmailIds.includes(selectedEmail.id) ? 'Marquer comme non traité' : 'Marquer comme traité'}
+                  >
+                    <CheckCircle className="w-4 h-4" />
+                  </button>
+
+                  <button 
+                    onClick={() => setSelectedEmail(null)}
+                    className="p-2 border border-transparent hover:border-white/15 bg-transparent hover:bg-white/5 text-white/60 hover:text-white transition cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
               </div>
 
               {/* Scrollable contents split into Email body & AI analysis */}
@@ -1206,7 +1435,7 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* AI Response Draft widget */}
+                       {/* AI Response Draft widget */}
                       <div className="bg-[#141414] border border-white/15 p-5 space-y-4">
                         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-white/10 pb-3">
                           <p className="text-[10px] font-black uppercase tracking-widest text-white/40 flex items-center space-x-1.5">
@@ -1221,7 +1450,7 @@ export default function App() {
                               value={replyTone}
                               onChange={e => handleRegenerateDraft(e.target.value)}
                               disabled={replyLoading}
-                              className="bg-[#0D0D0D] text-white border border-white/15 text-xs font-black p-1.5 focus:outline-none focus:border-[#CCFF00]"
+                              className="bg-[#0D0D0D] text-white border border-white/15 text-xs font-black p-1.5 focus:outline-none focus:border-[#CCFF00] cursor-pointer"
                             >
                               <option value="Professionnel">Professionnel</option>
                               <option value="Amical / Chaleureux">Amical</option>
@@ -1229,6 +1458,28 @@ export default function App() {
                               <option value="Négociateur / Ferme">Ferme</option>
                               <option value="S'excuser pour retard">S'excuser retard</option>
                             </select>
+                          </div>
+                        </div>
+
+                        {/* Custom reply instructions area */}
+                        <div className="space-y-1.5 border-b border-white/5 pb-3">
+                          <span className="text-[10px] font-black text-white/40 uppercase tracking-widest">Consignes personnalisées (Optionnel) :</span>
+                          <div className="flex gap-2">
+                            <textarea
+                              rows={1}
+                              value={customInstructions}
+                              onChange={e => setCustomInstructions(e.target.value)}
+                              placeholder="ex: Proposer un appel mardi prochain à 14h..."
+                              disabled={replyLoading}
+                              className="flex-grow bg-[#0D0D0D] text-white border border-white/15 text-xs font-mono p-2 focus:outline-none focus:border-[#CCFF00] resize-none h-9 leading-normal"
+                            />
+                            <button
+                              onClick={() => handleRegenerateDraft(replyTone, customInstructions)}
+                              disabled={replyLoading}
+                              className="px-4 py-2 bg-[#CCFF00] hover:bg-[#CCFF00]/90 text-black font-black text-xs uppercase tracking-wider transition cursor-pointer flex items-center justify-center shrink-0 disabled:opacity-40"
+                            >
+                              Générer
+                            </button>
                           </div>
                         </div>
 
